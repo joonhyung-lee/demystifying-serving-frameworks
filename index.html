@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Demystifying Serving Frameworks — serving, inference, and GPUs from core to cluster.">
+  <title>Demystifying Serving Frameworks</title>
+
+  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/animations.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+</head>
+<body>
+  <div class="container page-enter">
+
+    <!-- Header -->
+    <header class="header">
+      <div class="header__bio animate-on-scroll">
+        <h1 style="margin:0; padding:0;">
+          <span class="text-name">Demystifying Serving Frameworks</span>
+        </h1>
+        <p style="margin-top: 12px; font-size: 20px; color: var(--color-text-secondary);">
+          Serving, inference, and GPUs &mdash; from core to cluster.
+        </p>
+        <p style="margin-top: 14px; font-size: 17px;">
+          Notes on the things that keep me up at night &mdash; how models get served at scale,
+          how inference distributes across devices, how GPUs actually work under the hood,
+          and anything else that sparks curiosity.
+        </p>
+        <div class="nav-links" style="margin-top: 14px;">
+          <a href="https://github.com/joonhyung-lee/demystifying-serving-frameworks" target="_blank">
+            <i class="fa-brands fa-github"></i> GitHub
+          </a>
+        </div>
+      </div>
+    </header>
+
+    <!-- Posts -->
+    <section class="section animate-on-scroll">
+      <h2 class="section__heading">Posts</h2>
+
+      <div class="blog-item animate-on-scroll stagger-1">
+        <span class="blog-item__date">Jun 2026</span>
+        <span class="blog-item__title">
+          <a href="blog/visual-guide-to-collective-ops/">Visual Guide to Parallelism</a>
+        </span>
+      </div>
+
+      <div class="blog-item animate-on-scroll stagger-2">
+        <span class="blog-item__date">May 2026</span>
+        <span class="blog-item__title">
+          <a href="blog/anatomy-of-expert-parallelism/">Anatomy of Expert Parallelism</a>
+        </span>
+      </div>
+
+      <div class="blog-item animate-on-scroll stagger-3">
+        <span class="blog-item__date">Apr 2026</span>
+        <span class="blog-item__title">
+          <a href="blog/parallelism-at-vllm/">Parallelism @ vLLM</a>
+        </span>
+      </div>
+
+      <!-- Add new posts here -->
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <p>&copy; 2026 Joonhyung Lee</p>
+    </footer>
+
+  </div>
+
+  <script src="js/main.js"></script>
+  <script src="js/animations.js"></script>
+</body>
+</html>

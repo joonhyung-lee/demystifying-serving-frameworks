@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Visual Guide to Parallelism — interactive topology diagrams, memory estimation, and collective operations.">
+  <title>Visual Guide to Parallelism</title>
+
+  <link rel="stylesheet" href="../../css/style.css">
+  <link rel="stylesheet" href="../../css/blog.css">
+  <link rel="stylesheet" href="../../css/animations.css">
+  <link rel="stylesheet" href="arch.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+</head>
+<body>
+  <div class="blog-container page-enter">
+
+    <a href="../../" class="back-link">
+      <i class="fa-solid fa-arrow-left"></i> Home
+    </a>
+
+    <header class="blog-header animate-on-scroll">
+      <h1 class="blog-header__title">Visual Guide to Parallelism</h1>
+      <div class="blog-header__meta">Joonhyung Lee &middot; June 2026</div>
+      <div class="blog-header__tags">
+        <span class="tag">Parallelism</span>
+        <span class="tag">Topology</span>
+        <span class="tag">Memory</span>
+        <span class="tag">Collective Ops</span>
+        <span class="tag">Interactive</span>
+      </div>
+    </header>
+
+    <article class="blog-content">
+
+      <p class="animate-on-scroll">
+        Interactive architecture diagrams and memory estimation for LLM models.
+        Click a model to explore &mdash; then click blocks in the diagram to expand
+        and see how each layer is sharded, which collective operations are used,
+        and how memory is allocated per GPU.
+      </p>
+
+      <!-- Model Architectures (interactive) -->
+      <div class="arch-container animate-on-scroll" style="margin: 20px 0;">
+        <div id="arch-model-grid" class="arch-model-grid"></div>
+        <div id="arch-detail"></div>
+      </div>
+
+    </article>
+
+    <footer class="footer">
+      <p>&copy; 2026 Joonhyung Lee</p>
+    </footer>
+
+  </div>
+
+  <!-- D3 -->
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+
+  <!-- ArchLib modules -->
+  <script src="js/model-arch-data.js"></script>
+  <script src="js/model-arch-memory.js"></script>
+  <script src="js/model-arch-topology.js"></script>
+  <script src="js/model-architectures.js"></script>
+
+  <!-- Main JS -->
+  <script src="../../js/main.js"></script>
+  <script src="../../js/animations.js"></script>
+</body>
+</html>
