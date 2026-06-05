@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Parallelism @ vLLM — TP, DP, EP and how they behave differently for dense vs MoE models.">
+  <title>Parallelism @ vLLM</title>
+
+  <link rel="stylesheet" href="../../css/style.css">
+  <link rel="stylesheet" href="../../css/blog.css">
+  <link rel="stylesheet" href="../../css/animations.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+</head>
+<body>
+  <div class="blog-container wide page-enter">
+
+    <a href="../../" class="back-link">
+      <i class="fa-solid fa-arrow-left"></i> Home
+    </a>
+
+    <!-- Header -->
+    <header class="blog-header animate-on-scroll">
+      <h1 class="blog-header__title">Parallelism @ vLLM</h1>
+      <div class="blog-header__meta">Joonhyung Lee &middot; April 2026</div>
+      <div class="blog-header__tags">
+        <span class="tag">vLLM</span>
+        <span class="tag">Parallelism</span>
+        <span class="tag">MoE</span>
+        <span class="tag">Collective Ops</span>
+      </div>
+    </header>
+
+    <!-- TOC -->
+    <nav class="toc animate-on-scroll">
+      <div class="toc__title">Table of Contents</div>
+      <ol>
+        <li><a href="#tldr">tl;dr &mdash; TP / DP / EP</a></li>
+        <li><a href="#vllm-moe">TP / DP / EP @ vLLM (w. MoE)</a></li>
+        <li><a href="#moe-background">Background: Why MoE?</a></li>
+        <li><a href="#ep-impl">EP Implementation in vLLM</a></li>
+      </ol>
+    </nav>
+
+    <!-- Content -->
+    <article class="blog-content">
+
+      <p class="animate-on-scroll" style="color: var(--color-text-secondary);">
+        Reference: <a href="https://rocm.blogs.amd.com/software-tools-optimization/vllm-moe-guide/README.html" target="_blank">AMD ROCm &mdash; vLLM MoE Guide</a>
+      </p>
+
+      <!-- ===== tl;dr: TP / DP / EP side-by-side ===== -->
+      <h2 id="tldr" class="animate-on-scroll"><code>tl;dr</code> TP / DP / EP</h2>
+
+      <div class="fig-grid fig-grid--3 animate-on-scroll">
+        <figure>
+          <div class="fig-grid__label">TP (Tensor Parallelism)</div>
+          <img src="assets/tp.png" alt="Tensor Parallelism">
+          <figcaption>Same X broadcast &rarr; partial outputs &rarr; AllReduce &rarr; final Y.<br>A single model <strong>split across</strong> GPUs.</figcaption>
+        </figure>
+        <figure>
+          <div class="fig-grid__label">DP (Data Parallelism)</div>
+          <img src="assets/dp.png" alt="Data Parallelism">
+          <figcaption>Each GPU runs the full model on its own batch &mdash; fully independent.<br>The same model <strong>replicated</strong> on each device.</figcaption>
+        </figure>
+        <figure>
+          <div class="fig-grid__label">EP (Expert Parallelism)</div>
+          <img src="assets/ep.png" alt="Expert Parallelism">
+          <figcaption>Tokens routed by top-k &rarr; dispatch &rarr; compute &rarr; combine.<br>FFN computation <strong>partitioned by expert</strong>.</figcaption>
+        </figure>
+      </div>
+
+      <!-- ===== vLLM MoE: 3 cases side-by-side ===== -->
+      <h2 id="vllm-moe" class="animate-on-scroll"><code>tl;dr</code> TP / DP / EP @ vLLM (w. MoE models)</h2>
+
+      <div class="fig-grid fig-grid--3 animate-on-scroll">
+        <figure>
+          <div class="fig-grid__label">Case 1: DP=2 / Dense (no MoE)</div>
+          <img src="assets/dp2-dense.png" alt="DP=2 on dense model">
+          <figcaption>True replica &middot; zero cross-GPU comm. Standard DP &mdash; no MoE means no expert routing needed.</figcaption>
+        </figure>
+        <figure>
+          <div class="fig-grid__label">Case 2: DP=2 / EP=OFF (MoE)</div>
+          <img src="assets/dp2-ep-off.png" alt="DP=2, EP off on MoE">
+          <figcaption>AllGather + ReduceScatter. Experts sharded along TP axis &mdash; <code>flatten_tp_size = 2</code>.</figcaption>
+        </figure>
+        <figure>
+          <div class="fig-grid__label">Case 3: DP=2 / EP=ON (MoE)</div>
+          <img src="assets/dp2-ep-on.png" alt="DP=2, EP on for MoE">
+          <figcaption>All-to-All dispatch + combine. Experts split at expert granularity &mdash; <code>ep_size = 2</code>.</figcaption>
+        </figure>
+      </div>
+
+      <p class="animate-on-scroll">
+        The critical difference: with EP OFF, experts are sharded <em>horizontally</em>
+        (each GPU holds a slice of every expert). With EP ON, experts are assigned <em>wholly</em>
+        (each GPU owns a subset of experts in full).
+      </p>
+
+      <div class="fig-grid fig-grid--2 animate-on-scroll">
+        <figure>
+          <div class="fig-grid__label">TP cut (EP off)</div>
+          <img src="assets/tp-vs-ep-cut.png" alt="TP cut vs EP cut">
+          <figcaption>Same weights, different cut &mdash; TP slices each expert horizontally, EP assigns each expert wholly.</figcaption>
+        </figure>
+        <figure>
+          <div class="fig-grid__label">EP + DP interaction</div>
+          <img src="assets/dp2-ep-on.png" alt="EP on detail">
+          <figcaption>Tokens move sparsely (only to their top-k expert's owner GPU).</figcaption>
+        </figure>
+      </div>
+
+      <!-- ===== Background: MoE ===== -->
+      <h2 id="moe-background" class="animate-on-scroll">Background: Why MoE?</h2>
+
+      <figure class="animate-on-scroll" style="max-width: 600px; margin: 0 auto;">
+        <img src="assets/moe-decoupling.png" alt="MoE decoupling capacity from inference cost" class="blog-image">
+        <figcaption>MoE: decoupling capacity from inference cost</figcaption>
+      </figure>
+
+      <p class="animate-on-scroll">
+        In the Transformer architecture, both memory and time complexity grow with attention.
+        This makes it easy to assume that Self Attention dominates compute in LLMs.
+        However, <strong>the Feed Forward Network actually accounts for more parameters
+        and a significant share of total computation</strong>.
+      </p>
+
+      <p class="animate-on-scroll">
+        <a href="https://huggingface.co/meta-llama/Llama-2-13b" target="_blank">Llama2-13B</a>'s
+        <code>LlamaDecoderLayer</code> consists of Self Attention and MLP (Feed Forward).
+        Counting the parameters for each:
+      </p>
+
+      <div class="comparison-table animate-on-scroll">
+        <table>
+          <thead>
+            <tr><th>Llama2-13B</th><th>LlamaAttention</th><th>LlamaMLP</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>13.02B</td><td>4.19B</td><td><strong>8.49B</strong></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p class="animate-on-scroll">
+        The MLP has nearly <strong>2x</strong> the parameters of all the query, key, and value
+        projections in Attention combined. Optimizing the
+        <strong>Feed Forward</strong> layers can have a larger impact on overall throughput
+        than optimizing Attention alone.
+      </p>
+
+      <h3 class="animate-on-scroll">Mixtral 8x7B</h3>
+
+      <p class="animate-on-scroll">
+        What about MoE models? Let's look at
+        <a href="https://mistral.ai/news/mixtral-of-experts/" target="_blank">Mixtral 8x7B</a>.
+      </p>
+
+      <div class="comparison-table animate-on-scroll">
+        <table>
+          <thead>
+            <tr><th>Mixtral 8x7B</th><th>MixtralAttention</th><th>MixtralMoeBlock</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>46.70B</td><td>1.34B</td><td><strong>45.10B</strong></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p class="animate-on-scroll">
+        Mixtral's 8 routed experts hold <strong>33x</strong> more parameters than MixtralAttention.
+        Since only 2 experts are activated per token, the effective parameter usage during inference
+        is roughly 33/4 &asymp; <strong>8x</strong>.
+      </p>
+
+      <p class="animate-on-scroll">
+        Mixtral 8x7B uses a slightly different scaling strategy.
+        Per <a href="https://arxiv.org/pdf/2001.08361.pdf" target="_blank">Scaling Laws for Neural Language Models</a>
+        (eq. 2.1), the FFN intermediate dimension
+        <span class="katex-inline">d_{ff}</span> is typically set to ~4x the model/attention dimensions
+        <span class="katex-inline">d_{attn}, d_{model}</span>.
+      </p>
+
+      <div class="comparison-table animate-on-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Model</th>
+              <th><span class="katex-inline">d_{ff}</span></th>
+              <th><span class="katex-inline">d_{model}</span></th>
+              <th><span class="katex-inline">d_{ff}/d_{model}</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td><a href="https://arxiv.org/pdf/2001.08361.pdf" target="_blank">Kaplan et al.</a></td><td>-</td><td>-</td><td>4</td></tr>
+            <tr><td>Llama2 13B</td><td>13824</td><td>5120</td><td>2.7</td></tr>
+            <tr><td>Mixtral 8x7B</td><td>14336</td><td>4096</td><td>3.5</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p class="animate-on-scroll">
+        The key difference from Llama2 is that Mixtral has <em>smaller</em> attention parameters
+        (Llama2-13B: 4.19B vs Mixtral 8x7B: 1.34B) while scaling up the Feed Forward
+        <span class="katex-inline">d_{ff}</span> dimension.
+        This design is reported to outperform Llama2 at comparable active parameter counts.
+      </p>
+
+      <h3 class="animate-on-scroll">Benchmark: DP scaling on gpt-oss-120b</h3>
+
+      <figure class="animate-on-scroll">
+        <img src="assets/throughput-chart.png" alt="Throughput vs interactivity chart" class="blog-image">
+        <figcaption>Significant per-device throughput degradation as DP scales from 1 to 4 to 8</figcaption>
+      </figure>
+
+      <div class="block-takeaway animate-on-scroll">
+        <strong>Note:</strong> The Y-axis is Total Token Throughput per Device.
+        In an ideal scenario with zero communication overhead, the dp1/dp4/dp8 curves
+        should be identical. In practice, per-device throughput drops as DP increases.
+      </div>
+
+      <!-- ===== EP Implementation ===== -->
+      <h2 id="ep-impl" class="animate-on-scroll">Expert Parallelism in vLLM</h2>
+
+      <div class="block-statement animate-on-scroll">
+        <strong>Key point:</strong> The DP boundary dissolves <em>only</em> for MoE layers.
+        Non-MoE layers (attention, etc.) retain standard DP semantics where each replica
+        operates independently. This is the core design principle of vLLM
+        (and SGLang / TRT-LLM and every other MoE serving system).
+      </div>
+
+      <h3 class="animate-on-scroll"><code>determine_expert_map()</code></h3>
+
+      <p class="animate-on-scroll">
+        <a href="https://github.com/vllm-project/vllm/blob/6fb3f7b46b12ea63265afbe6d53d6f15a5de7b3a/vllm/model_executor/layers/fused_moe/layer.py#L71" target="_blank">
+          <code>vllm/model_executor/layers/fused_moe/layer.py</code>
+        </a>
+      </p>
+
+      <pre class="animate-on-scroll"><code class="language-python">def determine_expert_map(
+    ep_size: int,
+    ep_rank: int,
+    global_num_experts: int,
+    expert_placement_strategy: ExpertPlacementStrategy = "linear",
+    num_fused_shared_experts: int = 0,
+    return_expert_mask: bool = False,
+) -> tuple[int, torch.Tensor | None, torch.Tensor | None]:
+    """
+    Calculates how many experts should be assigned to each rank for EP
+    and creates a mapping from global to local expert index.
+    Experts are distributed evenly across ranks.
+    """
+    assert ep_size > 0
+    if ep_size == 1:
+        return (global_num_experts, None, None)
+
+    # Distribute experts as evenly as possible to each rank.
+    base_experts = global_num_experts // ep_size
+    remainder = global_num_experts % ep_size
+    local_num_experts = base_experts + 1 if ep_rank < remainder \
+                        else base_experts
+
+    # Create a tensor of size num_experts filled with -1
+    expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
+
+    if expert_placement_strategy == "linear":
+        start_idx = ep_rank * base_experts + min(ep_rank, remainder)
+        expert_map[start_idx : start_idx + local_num_experts] = \
+            torch.arange(0, local_num_experts, dtype=torch.int32)
+    elif expert_placement_strategy == "round_robin":
+        local_log_experts = torch.arange(
+            ep_rank, global_num_experts, ep_size, dtype=torch.int32
+        )
+        expert_map[local_log_experts] = \
+            torch.arange(0, local_num_experts, dtype=torch.int32)</code></pre>
+
+      <h3 class="animate-on-scroll"><code>FusedMoEParallelConfig.make()</code></h3>
+
+      <p class="animate-on-scroll">
+        <a href="https://github.com/vllm-project/vllm/blob/6fb3f7b46b12ea63265afbe6d53d6f15a5de7b3a/vllm/model_executor/layers/fused_moe/config.py#L1167" target="_blank">
+          <code>vllm/model_executor/layers/fused_moe/config.py</code>
+        </a>
+        &mdash; core logic that determines the parallel config based on the TP, DP, EP combination:
+      </p>
+
+      <pre class="animate-on-scroll"><code class="language-python">@staticmethod
+def make(tp_size_, pcp_size_, dp_size_, sp_size_, vllm_parallel_config):
+    """
+    Examples:
+      TP=2, DP=1, EP=False:
+        device 0: TP={2,0} DP={1,0} EP={1,0}
+        device 1: TP={2,1} DP={1,0} EP={1,0}
+        # Tensors sharded across 2 devices.
+
+      TP=2, DP=2, EP=False:
+        device 0: TP={4,0} DP={2,0} EP={1,0}
+        device 1: TP={4,1} DP={2,0} EP={1,0}
+        device 2: TP={4,2} DP={2,1} EP={1,0}
+        device 3: TP={4,3} DP={2,1} EP={1,0}
+        # 2 engine instances, tensors sharded across 4 devices.
+
+      TP=2, DP=2, EP=True:
+        device 0: TP={1,0} DP={2,0} EP={4,0}
+        device 1: TP={1,0} DP={2,0} EP={4,1}
+        device 2: TP={1,0} DP={2,1} EP={4,2}
+        device 3: TP={1,0} DP={2,1} EP={4,3}
+        # 2 engine instances, experts split between 4 devices.
+    """
+    use_ep = (
+        dp_size_ * pcp_size_ * tp_size_ > 1
+        and vllm_parallel_config.enable_expert_parallel
+    )
+
+    if not use_ep:
+        return FusedMoEParallelConfig(
+            tp_size=tp_size, tp_rank=tp_rank, ...)
+
+    # EP: each device owns a set of experts fully.
+    # TP collapses to 1 — no tensor sharding inside experts.
+    assert use_ep
+    ep_size = tp_size  # TP world becomes EP world
+    ep_rank = tp_rank
+    return FusedMoEParallelConfig(
+        tp_size=1, tp_rank=0,
+        ep_size=ep_size, ep_rank=ep_rank, ...)</code></pre>
+
+      <div class="block-takeaway animate-on-scroll">
+        <strong>Key insight:</strong> When EP is enabled,
+        <code>ep_size = tp_size</code> and <code>tp_size = 1</code>.
+        The TP world is directly converted into the EP world &mdash;
+        each device owns its experts in full, with no tensor sharding within them.
+      </div>
+
+    </article>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <p>&copy; 2026 Joonhyung Lee</p>
+    </footer>
+
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script src="../../js/main.js"></script>
+  <script src="../../js/animations.js"></script>
+  <script>
+    hljs.highlightAll();
+    document.addEventListener('DOMContentLoaded', function () {
+      document.querySelectorAll('.katex-inline').forEach(function (el) {
+        katex.render(el.textContent, el, { displayMode: false, throwOnError: false });
+      });
+    });
+  </script>
+</body>
+</html>

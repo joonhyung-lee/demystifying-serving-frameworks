@@ -10,6 +10,106 @@
   padding: 0 20px 60px 20px;
 }
 
+/* Allow blog container to expand for wide content */
+.blog-container.wide {
+  max-width: 1100px;
+}
+
+/* --- Side-by-side Figure Grid --- */
+/* Break out of the blog column so grids get more room */
+.fig-grid {
+  display: grid;
+  gap: 16px;
+  margin: 24px -80px;
+  padding: 0 20px;
+}
+
+.fig-grid--2 { grid-template-columns: 1fr 1fr; }
+.fig-grid--3 { grid-template-columns: 1fr 1fr 1fr; }
+
+.fig-grid figure {
+  margin: 0;
+}
+
+.fig-grid figure img {
+  width: 100%;
+  height: auto;
+  display: block;
+  border-radius: 4px;
+  cursor: zoom-in;
+  transition: box-shadow 0.2s ease;
+}
+
+.fig-grid figure img:hover {
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+}
+
+.fig-grid figure figcaption {
+  text-align: center;
+  font-size: 13px;
+  color: var(--color-caption);
+  margin-top: 6px;
+  line-height: 1.4;
+}
+
+/* Label above each figure in the grid */
+.fig-grid__label {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--color-text);
+}
+
+@media (max-width: 900px) {
+  .fig-grid {
+    margin-left: 0;
+    margin-right: 0;
+    padding: 0;
+  }
+}
+
+@media (max-width: 768px) {
+  .fig-grid--2,
+  .fig-grid--3 {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* --- Image Lightbox --- */
+.lightbox-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-out;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.25s ease, visibility 0.25s ease;
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+
+.lightbox-overlay.open {
+  opacity: 1;
+  visibility: visible;
+}
+
+.lightbox-overlay img {
+  max-width: 92vw;
+  max-height: 90vh;
+  border-radius: 6px;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.4);
+  transform: scale(0.95);
+  transition: transform 0.25s ease;
+}
+
+.lightbox-overlay.open img {
+  transform: scale(1);
+}
+
 /* --- Blog Header --- */
 .blog-header {
   margin-bottom: 40px;

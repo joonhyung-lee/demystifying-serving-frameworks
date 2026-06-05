@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Anatomy of Expert Parallelism — EP ON vs OFF profiled on H200x8 with vLLM v0.18.0.">
+  <title>Anatomy of Expert Parallelism</title>
+
+  <link rel="stylesheet" href="../../css/style.css">
+  <link rel="stylesheet" href="../../css/blog.css">
+  <link rel="stylesheet" href="../../css/animations.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body>
+  <div class="blog-container page-enter">
+
+    <a href="../../" class="back-link">
+      <i class="fa-solid fa-arrow-left"></i> Home
+    </a>
+
+    <!-- Header -->
+    <header class="blog-header animate-on-scroll">
+      <h1 class="blog-header__title">Anatomy of Expert Parallelism</h1>
+      <div class="blog-header__meta">Joonhyung Lee &middot; May 2026</div>
+      <div class="blog-header__tags">
+        <span class="tag">Expert Parallelism</span>
+        <span class="tag">vLLM</span>
+        <span class="tag">DeepEP</span>
+        <span class="tag">Profiling</span>
+      </div>
+    </header>
+
+    <!-- TOC -->
+    <nav class="toc animate-on-scroll">
+      <div class="toc__title">Table of Contents</div>
+      <ol>
+        <li><a href="#overview">Overview</a></li>
+        <li><a href="#setup">Experiment Setup</a></li>
+        <li><a href="#time-budget">Per-Step Time Budget</a></li>
+        <li><a href="#gpu-occupancy">GPU Occupancy Timeline</a></li>
+        <li><a href="#collective-ops">Collective Ops Aligned</a></li>
+      </ol>
+    </nav>
+
+    <!-- Content -->
+    <article class="blog-content">
+
+      <h2 id="overview" class="animate-on-scroll">Overview</h2>
+
+      <div class="block-statement animate-on-scroll">
+        A low-level analysis of how data moves under EP ON vs EP OFF,
+        and what effect each has on performance.
+      </div>
+
+      <h2 id="setup" class="animate-on-scroll">Experiment Setup</h2>
+
+      <div class="comparison-table animate-on-scroll">
+        <table>
+          <thead>
+            <tr><th>Parameter</th><th>Value</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>GPU</strong></td><td>H200 &times; 8ea</td></tr>
+            <tr><td><strong>Framework</strong></td><td>vLLM v0.18.0</td></tr>
+            <tr><td><strong>DP</strong></td><td>4</td></tr>
+            <tr><td><strong>EP</strong></td><td>ON / OFF</td></tr>
+            <tr><td><strong>max-num-seqs</strong></td><td>256</td></tr>
+            <tr><td><strong>ISL / OSL</strong></td><td>1k / 1k</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p class="animate-on-scroll">
+        We compare three configurations:
+        <strong>EP OFF</strong> (AllGather + ReduceScatter),
+        <strong>EP ON (AgRs)</strong> (AllGather + ReduceScatter-based EP),
+        and <strong>EP ON (DeepEP)</strong>.
+      </p>
+
+      <h2 id="time-budget" class="animate-on-scroll">Per-Step Time Budget</h2>
+
+      <figure class="animate-on-scroll">
+        <img src="assets/fig1_per_step_time_budget.png" alt="Per-step GPU time budget" class="blog-image">
+        <figcaption>
+          Per-step GPU time budget &mdash; collective broken out by op
+          (gpt-oss-120b &middot; 8&times;H200 &middot; rank-mean &middot; each label: ms/step &middot; &mu;s/call)
+        </figcaption>
+      </figure>
+
+      <div class="block-takeaway animate-on-scroll">
+        <strong>EP OFF: 15.1 ms</strong> &mdash; matmul dominates (9.77 ms). AllGather + ReduceScatter total ~1.4 ms.<br>
+        <strong>EP ON (AgRs): 18.7 ms</strong> &mdash; similar matmul (11.08 ms). AllGather grows (1.11 ms), ReduceScatter appears (1.15 ms).<br>
+        <strong>EP ON (DeepEP): 21.0 ms</strong> &mdash; DeepEP dispatch/combine adds ~1.5 ms. The notify barrier is the dominant overhead (6.73 ms).
+      </div>
+
+      <h2 id="gpu-occupancy" class="animate-on-scroll">GPU Occupancy Timeline</h2>
+
+      <figure class="animate-on-scroll">
+        <img src="assets/fig2_gpu_occupancy_timeline.png" alt="GPU compute-stream occupancy" class="blog-image">
+        <figcaption>
+          GPU compute-stream occupancy &mdash; real trace (rank0)
+        </figcaption>
+      </figure>
+
+      <div class="comparison-table animate-on-scroll">
+        <table>
+          <thead>
+            <tr><th>Config</th><th>Compute</th><th>Comm</th><th>Idle</th><th>ms/step</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>EP off</strong></td><td>87%</td><td>11%</td><td>2%</td><td>&asymp;16</td></tr>
+            <tr><td><strong>EP on (AgRs)</strong></td><td>86%</td><td>13%</td><td>2%</td><td>&asymp;19</td></tr>
+            <tr><td><strong>EP on (DeepEP)</strong></td><td>24%</td><td>8%</td><td>68%</td><td>&asymp;67</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p class="animate-on-scroll">
+        EP OFF and EP ON (AgRs) show similar compute utilization, while
+        <strong>DeepEP's idle time spikes to 68%</strong>.
+        The primary cause is the notify barrier synchronization blocking the GPU.
+      </p>
+
+      <h2 id="collective-ops" class="animate-on-scroll">Collective Ops Aligned</h2>
+
+      <figure class="animate-on-scroll">
+        <img src="assets/fig3_collective_occupancy_synced.png" alt="Collective ops aligned with GPU occupancy" class="blog-image">
+        <figcaption>
+          Collective ops aligned with GPU occupancy &mdash; same 200 ms wall-clock
+        </figcaption>
+      </figure>
+
+      <p class="animate-on-scroll">
+        Within the same 200 ms window:
+      </p>
+      <ul class="animate-on-scroll">
+        <li><strong>EP off:</strong> ~13 steps &middot; compute 87% &mdash; collective ops interleave briefly between compute</li>
+        <li><strong>EP on (AgRs):</strong> ~10 steps &middot; compute 85% &mdash; collective frequency increases but compute remains dense</li>
+        <li><strong>DeepEP:</strong> ~3 steps &middot; compute 24% &mdash; both compute and collective are sparse, idle gaps dominate</li>
+      </ul>
+
+      <div class="block-takeaway animate-on-scroll">
+        <strong>Takeaway:</strong> Enabling EP unlocks per-expert routing, but GPU utilization
+        varies dramatically depending on the collective operation type and synchronization strategy.
+        For DeepEP, the performance bottleneck is not dispatch/combine itself but rather the
+        <strong>notify barrier</strong> blocking.
+      </div>
+
+    </article>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <p>&copy; 2026 Joonhyung Lee</p>
+    </footer>
+
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="../../js/main.js"></script>
+  <script src="../../js/animations.js"></script>
+  <script>hljs.highlightAll();</script>
+</body>
+</html>

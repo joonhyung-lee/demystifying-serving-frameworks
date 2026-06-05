@@ -208,6 +208,43 @@
     );
   }
 
+  // --- Image Lightbox ---
+  function initLightbox() {
+    // Create overlay once
+    let overlay = document.querySelector('.lightbox-overlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.className = 'lightbox-overlay';
+      overlay.innerHTML = '<img src="" alt="">';
+      document.body.appendChild(overlay);
+
+      overlay.addEventListener('click', () => {
+        overlay.classList.remove('open');
+      });
+
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') overlay.classList.remove('open');
+      });
+    }
+
+    const overlayImg = overlay.querySelector('img');
+
+    // Attach to all blog images and fig-grid images
+    document
+      .querySelectorAll('.fig-grid figure img, .blog-content figure img, .blog-image')
+      .forEach((img) => {
+        if (img.dataset.lightbox) return;
+        img.dataset.lightbox = '1';
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', (e) => {
+          e.stopPropagation();
+          overlayImg.src = img.src;
+          overlayImg.alt = img.alt;
+          overlay.classList.add('open');
+        });
+      });
+  }
+
   // --- Initialize ---
   function init() {
     initTabs();
@@ -216,6 +253,7 @@
     initCodeCopy();
     initTocHighlight();
     initBackToTop();
+    initLightbox();
   }
 
   if (document.readyState === 'loading') {
@@ -230,6 +268,7 @@
     initAccordions,
     initCodeCopy,
     initTocHighlight,
+    initLightbox,
     reinit: init,
   };
 })();
