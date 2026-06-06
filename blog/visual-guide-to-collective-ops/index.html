@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="Visual Guide to Parallelism — interactive topology diagrams, memory estimation, and collective operations.">
+  <meta name="description" content="Visual Guide to Parallelism — interactive architecture diagrams, memory estimation, and collective operations for LLM models.">
   <title>Visual Guide to Parallelism</title>
 
   <link rel="stylesheet" href="../../css/style.css">
@@ -11,9 +11,53 @@
   <link rel="stylesheet" href="../../css/animations.css">
   <link rel="stylesheet" href="arch.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+
+  <style>
+    /* Override blog container to be full-width for the interactive tool */
+    .blog-container.arch-page {
+      max-width: 1400px;
+      padding: 0 24px 60px 24px;
+    }
+
+    /* Arch container needs white bg like the original dashboard */
+    .arch-container {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      padding: 0 0 1rem 0;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+    }
+
+    /* Section title inside arch container */
+    .arch-section-title {
+      font-size: 1.1rem;
+      font-weight: 700;
+      padding: 1rem 1rem 0.5rem;
+      color: #111827;
+    }
+
+    .arch-section-desc {
+      padding: 0 1rem 0.75rem;
+      font-size: 0.85rem;
+      color: #6b7280;
+    }
+
+    /* Detail panel styling */
+    #arch-detail {
+      margin: 0.75rem 1rem 0;
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+    }
+    #arch-detail:empty {
+      display: none;
+    }
+  </style>
 </head>
 <body>
-  <div class="blog-container page-enter">
+  <div class="blog-container arch-page page-enter">
 
     <a href="../../" class="back-link">
       <i class="fa-solid fa-arrow-left"></i> Home
@@ -35,13 +79,18 @@
 
       <p class="animate-on-scroll">
         Interactive architecture diagrams and memory estimation for LLM models.
-        Click a model to explore &mdash; then click blocks in the diagram to expand
+        Click a model to explore, then click blocks in the diagram to expand
         and see how each layer is sharded, which collective operations are used,
         and how memory is allocated per GPU.
       </p>
 
       <!-- Model Architectures (interactive) -->
-      <div class="arch-container animate-on-scroll" style="margin: 20px 0;">
+      <div class="arch-container animate-on-scroll">
+        <div class="arch-section-title">Model Architectures</div>
+        <div class="arch-section-desc">
+          Select a model below. Adjust DP, TP, and EP to see how layers are distributed
+          across GPUs and which collective operations are triggered.
+        </div>
         <div id="arch-model-grid" class="arch-model-grid"></div>
         <div id="arch-detail"></div>
       </div>
@@ -54,17 +103,26 @@
 
   </div>
 
-  <!-- D3 -->
+  <!-- D3 (required for architecture SVG diagrams) -->
   <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
 
-  <!-- ArchLib modules -->
+  <!-- ArchLib modules (order matters: data → memory → topology → main) -->
   <script src="js/model-arch-data.js"></script>
   <script src="js/model-arch-memory.js"></script>
   <script src="js/model-arch-topology.js"></script>
   <script src="js/model-architectures.js"></script>
 
-  <!-- Main JS -->
+  <!-- Blog JS -->
   <script src="../../js/main.js"></script>
   <script src="../../js/animations.js"></script>
+
+  <!-- Initialize the architecture viewer -->
+  <script>
+    document.addEventListener('DOMContentLoaded', function () {
+      if (window.initModelArchitectures) {
+        window.initModelArchitectures();
+      }
+    });
+  </script>
 </body>
 </html>
