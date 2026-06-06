@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="MoE vs Dense Parallelism — how TP, DP, and EP shape data movement for gpt-oss-120b and Llama 70B in vLLM.">
+  <title>MoE vs Dense: Parallelism &amp; Collective Operations</title>
+
+  <link rel="stylesheet" href="../../css/style.css">
+  <link rel="stylesheet" href="../../css/blog.css">
+  <link rel="stylesheet" href="../../css/animations.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+
+  <style>
+    /* Post-local styles for topology diagrams */
+    .topo-box {
+      display: inline-flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      text-align: center;
+      line-height: 1.35;
+      min-width: 100px;
+    }
+    .topo-box--sub { font-size: 11px; font-weight: 400; opacity: 0.8; }
+    .topo-row {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .topo-arrow {
+      text-align: center;
+      font-size: 18px;
+      color: var(--color-caption);
+      margin: 4px 0;
+    }
+    .topo-comm-band {
+      text-align: center;
+      padding: 6px 16px;
+      border-radius: 4px;
+      font-size: 13px;
+      font-weight: 600;
+      margin: 4px auto;
+      max-width: fit-content;
+    }
+    .topo-diagram {
+      background: var(--color-code-bg);
+      border-radius: 8px;
+      padding: 20px;
+      margin: 16px 0;
+      overflow-x: auto;
+    }
+    .topo-diagram__title {
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 12px;
+      text-align: center;
+    }
+    .topo-tp-group {
+      border: 1.5px solid #93c5fd;
+      border-radius: 8px;
+      padding: 8px;
+      background: rgba(59, 130, 246, 0.03);
+      display: inline-flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .topo-tp-label {
+      text-align: center;
+      font-size: 11px;
+      font-weight: 700;
+      color: #3b82f6;
+    }
+    .coll-card {
+      border-left: 3px solid;
+      padding: 10px 14px;
+      margin: 8px 0;
+      border-radius: 0 6px 6px 0;
+      background: rgba(0,0,0,0.02);
+    }
+    .coll-card__name { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
+    .coll-card__desc { font-size: 14px; color: var(--color-text-secondary); }
+  </style>
+</head>
+<body>
+  <div class="blog-container wide page-enter">
+
+    <a href="../../" class="back-link">
+      <i class="fa-solid fa-arrow-left"></i> Home
+    </a>
+
+    <header class="blog-header animate-on-scroll">
+      <h1 class="blog-header__title">MoE vs Dense:<br>Parallelism &amp; Collective Operations</h1>
+      <div class="blog-header__meta">Joonhyung Lee &middot; June 2026</div>
+      <div class="blog-header__tags">
+        <span class="tag">MoE</span>
+        <span class="tag">Dense</span>
+        <span class="tag">vLLM</span>
+        <span class="tag">TP</span>
+        <span class="tag">DP</span>
+        <span class="tag">EP</span>
+        <span class="tag">Collective Ops</span>
+      </div>
+    </header>
+
+    <nav class="toc animate-on-scroll">
+      <div class="toc__title">Table of Contents</div>
+      <ol>
+        <li><a href="#models">The Two Models</a></li>
+        <li><a href="#layer-sharding">Layer-by-Layer Sharding</a></li>
+        <li><a href="#dense-tp">Dense Model: TP Only (Llama 70B)</a></li>
+        <li><a href="#moe-ep-off">MoE Model: EP OFF (gpt-oss-120b)</a></li>
+        <li><a href="#moe-ep-on">MoE Model: EP ON (gpt-oss-120b)</a></li>
+        <li><a href="#collectives">Collective Operations Reference</a></li>
+        <li><a href="#summary">Summary: Which Collective, When?</a></li>
+      </ol>
+    </nav>
+
+    <article class="blog-content">
+
+      <!-- ===== The Two Models ===== -->
+      <h2 id="models" class="animate-on-scroll">The Two Models</h2>
+
+      <p class="animate-on-scroll">
+        We compare two models that represent fundamentally different scaling strategies,
+        both served through vLLM:
+      </p>
+
+      <div class="comparison-table animate-on-scroll">
+        <table>
+          <thead>
+            <tr><th></th><th>gpt-oss-120b (MoE)</th><th>Llama 3.3 70B (Dense)</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Total params</strong></td><td>120B</td><td>70B</td></tr>
+            <tr><td><strong>Active params</strong></td><td>5B (top-4 of 128 experts)</td><td>70B (all)</td></tr>
+            <tr><td><strong>Architecture</strong></td><td>MoE</td><td>Dense</td></tr>
+            <tr><td><strong>Attention</strong></td><td>Alternating Sink/Full GQA</td><td>GQA</td></tr>
+            <tr><td><strong>Layers</strong></td><td>36</td><td>80</td></tr>
+            <tr><td><strong>Hidden size</strong></td><td>2,880</td><td>8,192</td></tr>
+            <tr><td><strong>FFN dim</strong></td><td>2,880</td><td>28,672</td></tr>
+            <tr><td><strong>Q / KV heads</strong></td><td>64 / 8</td><td>64 / 8</td></tr>
+            <tr><td><strong>Experts</strong></td><td>128 routed, top-4</td><td>N/A</td></tr>
+            <tr><td><strong>Context</strong></td><td>128K</td><td>128K</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="block-takeaway animate-on-scroll">
+        <strong>Key difference:</strong> gpt-oss has 120B total parameters but only activates 5B per token
+        (top-4 of 128 experts). Llama activates all 70B on every token. This fundamentally
+        changes how parallelism and communication work.
+      </div>
+
+      <!-- ===== Layer-by-Layer Sharding ===== -->
+      <h2 id="layer-sharding" class="animate-on-scroll">Layer-by-Layer Sharding</h2>
+
+      <p class="animate-on-scroll">
+        Every serving framework must decide how to distribute each layer type across GPUs.
+        In vLLM, the mapping depends on the layer type and the parallelism mode:
+      </p>
+
+      <div class="comparison-table animate-on-scroll">
+        <table>
+          <thead>
+            <tr><th>Layer</th><th>Dense (Llama) w/ TP</th><th>MoE (gpt-oss) w/ DP, EP OFF</th><th>MoE (gpt-oss) w/ DP, EP ON</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Embedding</strong></td>
+              <td>Column-parallel &divide;TP<br><code>AllReduce</code></td>
+              <td>Column-parallel &divide;TP<br><code>AllReduce</code></td>
+              <td>Column-parallel &divide;TP<br><code>AllReduce</code></td>
+            </tr>
+            <tr>
+              <td><strong>Attention</strong></td>
+              <td>Q/KV heads &divide;TP<br><code>AllReduce</code> after output proj</td>
+              <td>Q/KV heads &divide;TP<br><code>AllReduce</code> after output proj</td>
+              <td>Q/KV heads local (DP replica)<br>No comm</td>
+            </tr>
+            <tr>
+              <td><strong>FFN / MoE</strong></td>
+              <td>SwiGLU col-parallel &divide;TP<br><code>AllReduce</code> after down proj</td>
+              <td>All 128 experts on every GPU<br><code>AllGather</code> &rarr; compute &rarr; <code>ReduceScatter</code></td>
+              <td>Experts partitioned by EP rank<br><code>All-to-All</code> dispatch &rarr; compute &rarr; <code>All-to-All</code> combine</td>
+            </tr>
+            <tr>
+              <td><strong>LM Head</strong></td>
+              <td>Vocab &divide;TP</td>
+              <td>Vocab &divide;TP</td>
+              <td>Vocab local</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- ===== Dense: TP Only ===== -->
+      <h2 id="dense-tp" class="animate-on-scroll">Dense Model: TP Only (Llama 70B)</h2>
+
+      <p class="animate-on-scroll">
+        For a dense model like Llama 70B on 4 GPUs with TP=4, every layer is sharded identically.
+        The only collective operation needed is <strong>AllReduce</strong> &mdash; and it happens
+        at the same points in every layer:
+      </p>
+
+      <div class="topo-diagram animate-on-scroll">
+        <div class="topo-diagram__title">Llama 70B &middot; TP=4 &middot; Single forward pass through one layer</div>
+
+        <div class="topo-row">
+          <div class="topo-box" style="background:#dbeafe;border:1.5px solid #3b82f6">GPU 0<div class="topo-box--sub">Q h[0-15], KV 1h<br>FFN col[0-7167]</div></div>
+          <div class="topo-box" style="background:#dbeafe;border:1.5px solid #3b82f6">GPU 1<div class="topo-box--sub">Q h[16-31], KV 1h<br>FFN col[7168-14335]</div></div>
+          <div class="topo-box" style="background:#dbeafe;border:1.5px solid #3b82f6">GPU 2<div class="topo-box--sub">Q h[32-47], KV 1h<br>FFN col[14336-21503]</div></div>
+          <div class="topo-box" style="background:#dbeafe;border:1.5px solid #3b82f6">GPU 3<div class="topo-box--sub">Q h[48-63], KV 1h<br>FFN col[21504-28671]</div></div>
+        </div>
+        <div class="topo-arrow">&darr; partial outputs &darr;</div>
+        <div class="topo-comm-band" style="background:rgba(59,130,246,0.08);color:#3b82f6;border:1px solid rgba(59,130,246,0.2)">AllReduce &mdash; sum partials across TP group</div>
+        <div class="topo-arrow">&darr; identical result on all GPUs &darr;</div>
+        <div class="topo-row">
+          <div class="topo-box" style="background:#d1fae5;border:1.5px solid #059669">Next layer (same sharding)</div>
+        </div>
+      </div>
+
+      <div class="block-takeaway animate-on-scroll">
+        <strong>Dense TP is simple:</strong> every layer uses the same pattern &mdash; shard weights,
+        compute partial results, AllReduce. No routing, no token movement between GPUs.
+        The only cost is the AllReduce bandwidth, which scales with hidden size.
+      </div>
+
+      <!-- ===== MoE: EP OFF ===== -->
+      <h2 id="moe-ep-off" class="animate-on-scroll">MoE Model: EP OFF (gpt-oss-120b)</h2>
+
+      <p class="animate-on-scroll">
+        With EP disabled and DP=4, vLLM uses the DP ranks as extra TP ranks for the MoE layer.
+        Each GPU holds <em>all 128 experts</em> but with weights sharded along the intermediate
+        dimension (<code>flatten_tp_size = dp &times; tp</code>). This requires:
+      </p>
+
+      <ol class="animate-on-scroll">
+        <li><strong>AllGather</strong> &mdash; replicate all tokens from all DP ranks to every GPU</li>
+        <li><strong>Local compute</strong> &mdash; each GPU runs top-4 routing on its sharded expert weights</li>
+        <li><strong>ReduceScatter</strong> &mdash; sum partial results and scatter back to owner ranks</li>
+      </ol>
+
+      <div class="topo-diagram animate-on-scroll">
+        <div class="topo-diagram__title">gpt-oss-120b &middot; DP=4, EP OFF &middot; MoE layer dataflow</div>
+
+        <div class="topo-row">
+          <div class="topo-box" style="background:#d1fae5;border:1.5px solid #059669">GPU 0<div class="topo-box--sub">Attn (DP replica 0)<br>owns batch A</div></div>
+          <div class="topo-box" style="background:#d1fae5;border:1.5px solid #059669">GPU 1<div class="topo-box--sub">Attn (DP replica 1)<br>owns batch B</div></div>
+          <div class="topo-box" style="background:#d1fae5;border:1.5px solid #059669">GPU 2<div class="topo-box--sub">Attn (DP replica 2)<br>owns batch C</div></div>
+          <div class="topo-box" style="background:#d1fae5;border:1.5px solid #059669">GPU 3<div class="topo-box--sub">Attn (DP replica 3)<br>owns batch D</div></div>
+        </div>
+        <div class="topo-arrow">&darr;</div>
+        <div class="topo-comm-band" style="background:rgba(5,150,105,0.08);color:#059669;border:1px solid rgba(5,150,105,0.2)">AllGather &mdash; every GPU now sees tokens A+B+C+D</div>
+        <div class="topo-arrow">&darr;</div>
+        <div class="topo-row">
+          <div class="topo-box" style="background:#fee2e2;border:1.5px solid #dc2626">GPU 0<div class="topo-box--sub">All 128 experts<br>FFN col[0-719]<br>compute on A+B+C+D</div></div>
+          <div class="topo-box" style="background:#fee2e2;border:1.5px solid #dc2626">GPU 1<div class="topo-box--sub">All 128 experts<br>FFN col[720-1439]<br>compute on A+B+C+D</div></div>
+          <div class="topo-box" style="background:#fee2e2;border:1.5px solid #dc2626">GPU 2<div class="topo-box--sub">All 128 experts<br>FFN col[1440-2159]<br>compute on A+B+C+D</div></div>
+          <div class="topo-box" style="background:#fee2e2;border:1.5px solid #dc2626">GPU 3<div class="topo-box--sub">All 128 experts<br>FFN col[2160-2879]<br>compute on A+B+C+D</div></div>
+        </div>
+        <div class="topo-arrow">&darr;</div>
+        <div class="topo-comm-band" style="background:rgba(5,150,105,0.08);color:#059669;border:1px solid rgba(5,150,105,0.2)">ReduceScatter &mdash; sum partials, scatter back to owner</div>
+        <div class="topo-arrow">&darr;</div>
+        <div class="topo-row">
+          <div class="topo-box" style="background:#d1fae5;border:1.5px solid #059669">GPU 0 &rarr; out A</div>
+          <div class="topo-box" style="background:#d1fae5;border:1.5px solid #059669">GPU 1 &rarr; out B</div>
+          <div class="topo-box" style="background:#d1fae5;border:1.5px solid #059669">GPU 2 &rarr; out C</div>
+          <div class="topo-box" style="background:#d1fae5;border:1.5px solid #059669">GPU 3 &rarr; out D</div>
+        </div>
+      </div>
+
+      <div class="block-takeaway animate-on-scroll">
+        <strong>EP OFF trade-off:</strong> every GPU holds all experts (high memory), but the
+        communication is regular (AllGather + ReduceScatter). The sparse routing is <em>not</em>
+        exploited &mdash; all tokens are replicated to all GPUs regardless of which expert they need.
+      </div>
+
+      <!-- ===== MoE: EP ON ===== -->
+      <h2 id="moe-ep-on" class="animate-on-scroll">MoE Model: EP ON (gpt-oss-120b)</h2>
+
+      <p class="animate-on-scroll">
+        With EP enabled, each GPU owns a subset of experts in full. Tokens are routed
+        <strong>point-to-point</strong> only to the GPU that owns the selected expert.
+        This exploits sparsity &mdash; only top-k experts' tokens actually move.
+      </p>
+
+      <div class="topo-diagram animate-on-scroll">
+        <div class="topo-diagram__title">gpt-oss-120b &middot; DP=4, EP ON &middot; MoE layer dataflow</div>
+
+        <div class="topo-row">
+          <div class="topo-box" style="background:#d1fae5;border:1.5px solid #059669">GPU 0<div class="topo-box--sub">Attn (DP replica 0)<br>owns batch A</div></div>
+          <div class="topo-box" style="background:#d1fae5;border:1.5px solid #059669">GPU 1<div class="topo-box--sub">Attn (DP replica 1)<br>owns batch B</div></div>
+          <div class="topo-box" style="background:#d1fae5;border:1.5px solid #059669">GPU 2<div class="topo-box--sub">Attn (DP replica 2)<br>owns batch C</div></div>
+          <div class="topo-box" style="background:#d1fae5;border:1.5px solid #059669">GPU 3<div class="topo-box--sub">Attn (DP replica 3)<br>owns batch D</div></div>
+        </div>
+        <div class="topo-arrow">&darr;</div>
+        <div class="topo-comm-band" style="background:rgba(147,51,234,0.06);color:#9333ea;border:1px solid rgba(147,51,234,0.2)">All-to-All dispatch &mdash; each token sent to its expert's owner GPU</div>
+        <div class="topo-arrow">&darr;</div>
+        <div class="topo-row">
+          <div class="topo-box" style="background:#fee2e2;border:1.5px solid #dc2626">GPU 0<div class="topo-box--sub">E0&ndash;E31<br>full weight each<br>routed tokens only</div></div>
+          <div class="topo-box" style="background:#fce7f3;border:1.5px solid #dc2626">GPU 1<div class="topo-box--sub">E32&ndash;E63<br>full weight each<br>routed tokens only</div></div>
+          <div class="topo-box" style="background:#fef3c7;border:1.5px solid #dc2626">GPU 2<div class="topo-box--sub">E64&ndash;E95<br>full weight each<br>routed tokens only</div></div>
+          <div class="topo-box" style="background:#e0f2fe;border:1.5px solid #dc2626">GPU 3<div class="topo-box--sub">E96&ndash;E127<br>full weight each<br>routed tokens only</div></div>
+        </div>
+        <div class="topo-arrow">&darr;</div>
+        <div class="topo-comm-band" style="background:rgba(147,51,234,0.06);color:#9333ea;border:1px solid rgba(147,51,234,0.2)">All-to-All combine &mdash; return results to source GPU</div>
+        <div class="topo-arrow">&darr;</div>
+        <div class="topo-row">
+          <div class="topo-box" style="background:#d1fae5;border:1.5px solid #059669">GPU 0 &rarr; out A</div>
+          <div class="topo-box" style="background:#d1fae5;border:1.5px solid #059669">GPU 1 &rarr; out B</div>
+          <div class="topo-box" style="background:#d1fae5;border:1.5px solid #059669">GPU 2 &rarr; out C</div>
+          <div class="topo-box" style="background:#d1fae5;border:1.5px solid #059669">GPU 3 &rarr; out D</div>
+        </div>
+      </div>
+
+      <div class="block-takeaway animate-on-scroll">
+        <strong>EP ON trade-off:</strong> lower memory per GPU (each holds 1/4 of experts),
+        and data movement is sparse (only routed tokens cross GPUs). But the All-to-All
+        pattern is irregular and harder to overlap with compute.
+      </div>
+
+      <!-- ===== Side-by-side comparison ===== -->
+      <h3 class="animate-on-scroll">EP OFF vs EP ON at a glance</h3>
+
+      <div class="fig-grid fig-grid--2 animate-on-scroll">
+        <figure>
+          <div class="fig-grid__label">EP OFF: AllGather + ReduceScatter</div>
+          <img src="../parallelism-at-vllm/assets/dp2-ep-off.png" alt="EP OFF dataflow">
+          <figcaption>DP rank acts as TP rank inside MoE. All tokens replicated to all GPUs. Dense communication pattern.</figcaption>
+        </figure>
+        <figure>
+          <div class="fig-grid__label">EP ON: All-to-All</div>
+          <img src="../parallelism-at-vllm/assets/dp2-ep-on.png" alt="EP ON dataflow">
+          <figcaption>DP rank acts as EP rank. Tokens move sparsely to expert-owner GPU only. Point-to-point communication.</figcaption>
+        </figure>
+      </div>
+
+      <!-- ===== Collective Operations Reference ===== -->
+      <h2 id="collectives" class="animate-on-scroll">Collective Operations Reference</h2>
+
+      <p class="animate-on-scroll">
+        Four collective operations appear in the dataflows above.
+        Here is what each one does:
+      </p>
+
+      <div class="coll-card animate-on-scroll" style="border-color:#3b82f6">
+        <div class="coll-card__name" style="color:#3b82f6">AllReduce</div>
+        <div class="coll-card__desc">
+          Each rank holds a <strong>partial result</strong>. The operation (typically sum) is applied
+          element-wise across all ranks, and <strong>every rank receives the same final result</strong>.<br>
+          <strong>Used in:</strong> TP &mdash; after every attention output projection and FFN down projection.
+        </div>
+      </div>
+
+      <div class="coll-card animate-on-scroll" style="border-color:#059669">
+        <div class="coll-card__name" style="color:#059669">AllGather</div>
+        <div class="coll-card__desc">
+          Each rank holds its <strong>own chunk</strong>. After AllGather, every rank has the
+          <strong>concatenation of all chunks</strong>.<br>
+          <strong>Used in:</strong> MoE EP OFF &mdash; before the MoE layer, to replicate all DP ranks' tokens
+          to every GPU so they can all compute on the full token set.
+        </div>
+      </div>
+
+      <div class="coll-card animate-on-scroll" style="border-color:#059669">
+        <div class="coll-card__name" style="color:#059669">ReduceScatter</div>
+        <div class="coll-card__desc">
+          Each rank holds the <strong>full data</strong>. The operation is applied element-wise, and
+          each rank receives <strong>only its own reduced portion</strong>.<br>
+          <strong>Used in:</strong> MoE EP OFF &mdash; after the MoE layer, to sum partial expert outputs
+          and scatter each rank's portion back.
+        </div>
+      </div>
+
+      <div class="coll-card animate-on-scroll" style="border-color:#9333ea">
+        <div class="coll-card__name" style="color:#9333ea">All-to-All</div>
+        <div class="coll-card__desc">
+          Each rank sends <strong>different data to each other rank</strong>. Rank <em>i</em>'s <em>j</em>-th
+          chunk goes to rank <em>j</em>. This is <strong>point-to-point, irregular</strong> communication.<br>
+          <strong>Used in:</strong> MoE EP ON &mdash; dispatch (send tokens to expert-owner GPU) and
+          combine (return results to source GPU).
+        </div>
+      </div>
+
+      <!-- ===== Summary ===== -->
+      <h2 id="summary" class="animate-on-scroll">Summary: Which Collective, When?</h2>
+
+      <div class="comparison-table animate-on-scroll">
+        <table>
+          <thead>
+            <tr><th>Scenario</th><th>Collective(s)</th><th>Pattern</th><th>Data moved</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Dense TP</strong><br>(Llama 70B)</td>
+              <td style="color:#3b82f6"><strong>AllReduce</strong></td>
+              <td>Regular, symmetric</td>
+              <td>Partial activations<br>(hidden_size per layer)</td>
+            </tr>
+            <tr>
+              <td><strong>MoE EP OFF</strong><br>(gpt-oss, DP&gt;1)</td>
+              <td style="color:#059669"><strong>AllGather</strong> +<br><strong>ReduceScatter</strong></td>
+              <td>Regular, symmetric</td>
+              <td>All tokens replicated<br>(tokens &times; hidden per MoE layer)</td>
+            </tr>
+            <tr>
+              <td><strong>MoE EP ON</strong><br>(gpt-oss, DP&gt;1)</td>
+              <td style="color:#9333ea"><strong>All-to-All</strong> &times;2</td>
+              <td>Irregular, sparse</td>
+              <td>Only routed tokens<br>(top-k fraction, point-to-point)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="block-takeaway animate-on-scroll">
+        <strong>The fundamental insight:</strong> Dense models only need AllReduce (symmetric, predictable).
+        MoE models introduce a new dimension &mdash; EP OFF trades memory for regular communication
+        (AllGather + ReduceScatter), while EP ON trades regular communication for sparse, point-to-point
+        All-to-All that exploits expert sparsity but is harder to overlap with compute.
+      </div>
+
+    </article>
+
+    <footer class="footer">
+      <p>&copy; 2026 Joonhyung Lee</p>
+    </footer>
+
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script src="../../js/main.js"></script>
+  <script src="../../js/animations.js"></script>
+  <script>
+    hljs.highlightAll();
+    document.addEventListener('DOMContentLoaded', function () {
+      document.querySelectorAll('.katex-inline').forEach(function (el) {
+        katex.render(el.textContent, el, { displayMode: false, throwOnError: false });
+      });
+    });
+  </script>
+</body>
+</html>
